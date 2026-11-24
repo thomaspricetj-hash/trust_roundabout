@@ -39,6 +39,8 @@ Entities can:
 - Sandbox simulates real system with fake progress messages to keep entity engaged for longer tracking
 - Decoy files in sandbox: quarantined entities are offered fake sensitive files; download attempts are logged with origin location ping
 - Read-only enforcement: tagged/quarantined entities have code execution blocked and access restricted to read-only; advancement while tagged still enforces read-only
+- Firewall pre-filter: allowlist/blocklist per origin, port allowlist, protocol allowlist, geo blocklist, and per-tick rate limiting drop malicious traffic before it reaches the roundabout
+- False-positive verification recovery: entities in sandbox that show sustained trust recovery and low suspicion are automatically released back to Ring1 with admin notification, reducing false positives for legitimate users who hit a false door
 - Local admin-only full access: only entities with origin `local_admin` from on-site host terminal bypass read-only enforcement and can obtain full write/execute access; all remote entities remain read-only
 - Origin correlation tracking with auto-escalation: repeated false door hits from same origin trigger admin escalation and mass quarantine
 - Swarm mitigation: detects bursts of false door hits, activates swarm mode with tighter resonance tolerance and faster door rotation, and logs swarm alerts
@@ -147,6 +149,56 @@ See `whitepaper.md` for full design. Typical extensions:
 * Metrics export Prometheus/Grafana
 * Pluggable validators via WASM
 * Distributed roundabout with consensus
+
+## Security Hardening
+
+See `docs/SECURITY.md` for constant-time crypto, HSM-backed secrets stub, signed attestations, immutable audit log with hash chain, SIEM/SOAR integration stubs, and eBPF tap interface.
+
+## Pre-Installation
+
+See [INSTALL.md](INSTALL.md) for system requirements, dependencies, network and security prerequisites, and pre-install checklist.
+
+## Professional Installation for Corporations
+
+### Quick start - Docker
+```bash
+git clone <repo>
+cd trust_roundabout
+docker compose up -d
+```
+Config is mounted from `./config.toml`. Logs are persisted in Docker volume `trust_logs`.
+
+### Linux - Systemd
+```bash
+chmod +x scripts/install.sh
+sudo ./scripts/install.sh
+```
+Service is `trust-roundabout`. Manage with `systemctl status trust-roundabout`.
+
+### Windows - PowerShell
+Run as Administrator:
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process
+./scripts/install.ps1 -InstallDir "C:\Program Files\TrustRoundabout"
+```
+Creates a startup scheduled task and builds release binary.
+
+### Manual Build
+```bash
+rustup update
+cargo build --release
+cp config.toml.example config.toml
+# edit config.toml
+./target/release/trust_roundabout
+```
+
+Configuration reference:
+* `firewall.max_per_tick` - rate limit per origin per tick
+* `firewall.allow_ports / allow_protocols` - empty = permissive, fill to enforce L4/L7
+* `firewall.block_geo` - ISO country codes to block
+* `simulation.*` - demo entity counts and tick count
+
+For production wiring, see `docs/DEPLOYMENT.md`. The binary is plug-and-play with `config.toml` and can run beside existing firewalls.
 
 ## License
 

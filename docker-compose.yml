@@ -1,0 +1,18 @@
+version: "3.9"
+services:
+  trust_roundabout:
+    build: .
+    container_name: trust_roundabout
+    restart: unless-stopped
+    volumes:
+      - ./config.toml:/etc/trust_roundabout/config.toml:ro
+      - trust_logs:/var/log/trust_roundabout
+    environment:
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "pgrep", "trust_roundabout"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  trust_logs:

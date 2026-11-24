@@ -1,0 +1,17 @@
+[Unit]
+Description=Trust Roundabout Zero Trust Security Engine
+After=network.target
+
+[Service]
+Type=simple
+User=trustroundabout
+WorkingDirectory=/opt/trust_roundabout
+ExecStart=/opt/trust_roundabout/target/release/trust_roundabout
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

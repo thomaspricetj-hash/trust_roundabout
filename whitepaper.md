@@ -154,6 +154,14 @@ Network fingerprint and network risk scoring are tracked per entity. High-risk n
 ### 7.3 Local Admin-Only Full Access
 Only entities with origin `local_admin` – representing an on-site host terminal admin – bypass read-only enforcement. All remote entities are confined to read-only and cannot execute code. The simulation enforces `read_only` flag on quarantine, suspicion, and false-door tagging, with explicit exemption for `LOCAL_ADMIN_ORIGIN`. Admin access is logged and requires physical presence, preventing remote privilege escalation.
 
+### 7.4 False-Positive Verification Recovery
+To mitigate false positives, quarantined entities are monitored for trust recovery. If a tagged entity remains in sandbox for ≥20 ticks with suspicion <5 and trust_score ≥60, it is automatically released back to Ring1, `tagged` and `read_only` are cleared, and an admin notification is emitted. This provides a verification path for legitimate users who accidentally hit a false door, while persistent malicious behavior continues to escalate.
+
+### 7.5 Firewall Pre-Filter
+A lightweight firewall sits in front of the roundabout. It supports allowlist/blocklist per origin, port allowlist, protocol allowlist, geo blocklist, and per-tick rate limiting. Entities failing inspection are ejected before any trust evaluation, providing classic network filtering in addition to behavioral trust scoring. This reduces roundabout load and blocks obvious malicious sources early.
+
+Additional hardening added: port and protocol allowlists enforce L4/L7 policy, geo blocklist blocks high-risk countries, and per-origin rate limiting throttles floods. All checks are performed before resonance/HMAC evaluation.
+
 ## 8. Attack Simulation Test Suite
 
 `tests/attack_simulation.rs` validates design under adversarial load:

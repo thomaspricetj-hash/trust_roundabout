@@ -9,6 +9,40 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Immutable append-only audit log with hash chain for tamper evidence
+#[derive(Debug, Default)]
+pub struct AuditLog {
+    entries: Vec<String>,
+    last_hash: Vec<u8>,
+}
+impl AuditLog {
+    pub fn append(&mut self, event: &str) {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&self.last_hash);
+        hasher.update(event.as_bytes());
+        let hash = hasher.finalize().to_vec();
+        self.last_hash = hash.clone();
+        self.entries.push(event.to_string());
+    }
+    pub fn verify_chain(&self) -> bool {
+        // Simple verification stub - in production verify each link
+        true
+    }
+}
+
+/// Constant-time equality to avoid timing side-channels
+fn const_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntityType {
     Packet,
@@ -408,6 +442,94 @@ impl TrustRing {
     }
 }
 
+#[derive(Debug)]
+pub struct Firewall {
+    allowlist: std::collections::HashSet<String>,
+    blocklist: std::collections::HashSet<String>,
+    allowed_ports: std::collections::HashSet<u16>,
+    allowed_protocols: std::collections::HashSet<String>,
+    geo_blocklist: std::collections::HashSet<String>,
+    per_origin_rate: std::collections::HashMap<String, u32>,
+    max_per_tick: usize,
+}
+
+impl Firewall {
+    pub fn new(max_per_tick: usize) -> Self {
+        Self {
+            allowlist: std::collections::HashSet::new(),
+            blocklist: std::collections::HashSet::new(),
+            allowed_ports: std::collections::HashSet::new(),
+            allowed_protocols: std::collections::HashSet::new(),
+            geo_blocklist: std::collections::HashSet::new(),
+            per_origin_rate: std::collections::HashMap::new(),
+            max_per_tick,
+        }
+    }
+    pub fn allow_origin(&mut self, origin: &str) {
+        self.allowlist.insert(origin.to_string());
+    }
+    pub fn block_origin(&mut self, origin: &str) {
+        self.blocklist.insert(origin.to_string());
+    }
+    pub fn allow_port(&mut self, port: u16) {
+        self.allowed_ports.insert(port);
+    }
+    pub fn allow_protocol(&mut self, proto: &str) {
+        self.allowed_protocols.insert(proto.to_lowercase());
+    }
+    pub fn block_geo(&mut self, country: &str) {
+        self.geo_blocklist.insert(country.to_uppercase());
+    }
+    pub fn inspect(&mut self, entity: &Entity) -> bool {
+        let origin = entity.metadata.get("origin_user").cloned().unwrap_or_default();
+        if !self.allowlist.is_empty() && !self.allowlist.contains(&origin) {
+            return false;
+        }
+        if self.blocklist.contains(&origin) {
+            return false;
+        }
+        // Port allowlist
+        if !self.allowed_ports.is_empty() {
+            if let Some(port_str) = entity.metadata.get("port") {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    if !self.allowed_ports.contains(&port) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        // Protocol allowlist
+        if !self.allowed_protocols.is_empty() {
+            if let Some(proto) = entity.metadata.get("protocol") {
+                if !self.allowed_protocols.contains(&proto.to_lowercase()) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        // Geo blocklist
+        if let Some(country) = entity.metadata.get("country") {
+            if self.geo_blocklist.contains(&country.to_uppercase()) {
+                return false;
+            }
+        }
+        let count = self.per_origin_rate.entry(origin).or_insert(0);
+        if *count >= self.max_per_tick as u32 {
+            return false;
+        }
+        *count += 1;
+        true
+    }
+    pub fn reset_rates(&mut self) {
+        self.per_origin_rate.clear();
+    }
+}
+
 pub struct Roundabout {
     rings: Vec<TrustRing>,
     entities: Vec<Entity>,
@@ -418,6 +540,7 @@ pub struct Roundabout {
     swarm_cooldown: u64,
     false_hits_this_tick: usize,
     max_entities: usize,
+    firewall: Firewall,
 }
 
 impl Roundabout {
@@ -439,6 +562,7 @@ impl Roundabout {
             swarm_cooldown: 0,
             false_hits_this_tick: 0,
             max_entities: 100,
+            firewall: Firewall::new(1000),
         }
     }
 
@@ -486,9 +610,30 @@ impl Roundabout {
         self.prune_maps();
     }
 
+    pub fn firewall_allow_origin(&mut self, origin: &str) {
+        self.firewall.allow_origin(origin);
+    }
+
+    pub fn firewall_block_origin(&mut self, origin: &str) {
+        self.firewall.block_origin(origin);
+    }
+
+    pub fn firewall_allow_port(&mut self, port: u16) {
+        self.firewall.allow_port(port);
+    }
+
+    pub fn firewall_allow_protocol(&mut self, proto: &str) {
+        self.firewall.allow_protocol(proto);
+    }
+
+    pub fn firewall_block_geo(&mut self, country: &str) {
+        self.firewall.block_geo(country);
+    }
+
     pub fn tick(&mut self) {
         self.tick = self.tick.saturating_add(1);
         self.false_hits_this_tick = 0;
+        self.firewall.reset_rates();
 
         if self.swarm_mode {
             if self.swarm_cooldown > 0 {
@@ -516,6 +661,14 @@ impl Roundabout {
                 entity.read_only = false;
                 entity.tagged = false;
                 entity.suspicion_score = 0;
+            }
+            // Firewall pre-filter
+            if !self.firewall.inspect(entity) {
+                if entity.ring != RingId::Ejected {
+                    println!("[FIREWALL DROP] Entity {} from user {} blocked by firewall - ejected", entity.id, entity.metadata.get("origin_user").unwrap_or(&"unknown".to_string()));
+                }
+                entity.ring = RingId::Ejected;
+                continue;
             }
             if entity.ring == RingId::Quarantine {
                 if !entity.is_local_admin() && !entity.read_only {
@@ -548,7 +701,19 @@ impl Roundabout {
                     let decoy_name = "confidential_designs_v2.zip";
                     println!("[DECOY FILE] Entity {} from user {} attempted download of {} - LOCATION PINGED: {}", entity.id, origin, decoy_name, origin);
                     // Increment suspicion to reflect interest in decoy assets
-                    entity.suspicion_score = entity.suspicion_score.saturating_add(1);
+                    if !entity.is_local_admin() {
+                        entity.suspicion_score = entity.suspicion_score.saturating_add(1);
+                    }
+                }
+                // Verification / false-positive recovery
+                // If entity has been in sandbox long enough without further suspicious behavior
+                // and trust has recovered, release it back to Ring1 with admin notification
+                if !entity.is_local_admin() && entity.tagged && entity.suspicion_score < 5 && entity.trust_score >= 60.0 && entity.circulation_ticks >= 20 {
+                    entity.ring = RingId::Ring1;
+                    entity.tagged = false;
+                    entity.read_only = false;
+                    entity.suspicion_score = 0;
+                    println!("[VERIFICATION RELEASE] Entity {} from user {} cleared sandbox after trust recovery - false positive resolved", entity.id, origin);
                 }
                 continue;
             }

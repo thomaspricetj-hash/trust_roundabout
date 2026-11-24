@@ -1,0 +1,20 @@
+[firewall]
+max_per_tick = 1000
+allow_ports = []
+allow_protocols = []
+block_geo = ["CN", "RU"]
+
+[roundabout]
+max_entities = 10000
+swarm_threshold = 5
+
+[audit]
+log_path = "/var/log/trust_roundabout/audit.log"
+siem_webhook = "https://siem.example.com/ingest"
+
+[simulation]
+ticks = 100
+entities_packet = 20
+entities_flow = 10
+entities_session = 5
+entities_device = 3
