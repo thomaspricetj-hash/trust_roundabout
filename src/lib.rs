@@ -705,6 +705,22 @@ impl Roundabout {
                         entity.suspicion_score = entity.suspicion_score.saturating_add(1);
                     }
                 }
+                // False router deception: quarantined entities see a fake router, real router is offset
+                if self.tick % 13 == 0 {
+                    let mut rng = rand::rng();
+                    let fake_ip = format!("192.168.{}.{}", rng.random_range(1..254), rng.random_range(1..254));
+                    let real_offset = rng.random_range(1..10);
+                    // Simulate realistic router session to avoid suspicion of fakeness
+                    println!("[FALSE ROUTER] Entity {} from user {} establishing TCP 22 to {} - session initiated", entity.id, origin, fake_ip);
+                    println!("[FALSE ROUTER] {} Router> {} - Banner displayed, login prompt shown", entity.id, fake_ip);
+                    let cmds = ["show ip route", "show ip interface brief", "show arp", "show running-config"];
+                    let cmd = cmds[rng.random_range(0..cmds.len())];
+                    println!("[FALSE ROUTER] {} Router# {} - command executed, fake output returned", entity.id, cmd);
+                    println!("[FALSE ROUTER] Entity {} from user {} connected to decoy router {} - REAL ROUTER IS OFFSET BY {} HOPS - ACCESS LOGGED", entity.id, origin, fake_ip, real_offset);
+                    if !entity.is_local_admin() {
+                        entity.suspicion_score = entity.suspicion_score.saturating_add(1);
+                    }
+                }
                 // Verification / false-positive recovery
                 // If entity has been in sandbox long enough without further suspicious behavior
                 // and trust has recovered, release it back to Ring1 with admin notification

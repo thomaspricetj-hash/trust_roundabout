@@ -38,6 +38,7 @@ Entities can:
 - False door usage tags entity, tracks origin user, admin alert, and sandbox quarantine
 - Sandbox simulates real system with fake progress messages to keep entity engaged for longer tracking
 - Decoy files in sandbox: quarantined entities are offered fake sensitive files; download attempts are logged with origin location ping
+- False router deception: quarantined entities are presented with a decoy router that mimics real router behavior – TCP 22 handshake, banner, login prompt, and plausible CLI commands with fake output. Real router is offset by random hops; all interactions are logged and increase suspicion
 - Read-only enforcement: tagged/quarantined entities have code execution blocked and access restricted to read-only; advancement while tagged still enforces read-only
 - Firewall pre-filter: allowlist/blocklist per origin, port allowlist, protocol allowlist, geo blocklist, and per-tick rate limiting drop malicious traffic before it reaches the roundabout
 - False-positive verification recovery: entities in sandbox that show sustained trust recovery and low suspicion are automatically released back to Ring1 with admin notification, reducing false positives for legitimate users who hit a false door

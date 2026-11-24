@@ -101,6 +101,8 @@ Quarantined entities remain active in a simulated environment:
 * Signature continues to evolve
 * Logging continues for origin tracking
 * User is kept engaged while attribution is collected
+* Decoy file lure with location ping on download
+* False router deception: quarantined entities are presented with a decoy router IP that behaves like a real router – TCP 22 handshake, banner, login prompt, and plausible CLI commands like `show ip route` with fake output are simulated. The real router sits an offset number of hops away. All interactions are logged and increase suspicion
 
 ### 4.3 Origin Correlation
 * `origin_hits` map counts false door hits per origin user
