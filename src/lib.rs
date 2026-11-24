@@ -2,7 +2,7 @@
 use rand::Rng;
 use rand::RngCore;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use uuid::Uuid;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -69,7 +69,6 @@ pub struct Entity {
     entity_type: EntityType,
     trust_score: f64,
     ring: RingId,
-    arrival_time: Instant,
     last_update: Instant,
     circulation_ticks: u32,
     priority: u8,
@@ -82,7 +81,11 @@ pub struct Entity {
     door_attempts: u32,
     last_attempt_tick: u64,
     attempt_cooldown: u64,
-}
+    network_fingerprint: String,
+    network_risk: f64,
+    last_network_fingerprint: String,
+    read_only: bool,
+} 
 
 pub const MAX_ORIGIN_LEN: usize = 64;
 pub const MAX_METADATA_ENTRIES: usize = 16;
@@ -91,6 +94,7 @@ pub const MAX_ORIGINS: usize = 2000;
 pub const SUSPICION_EJECT_THRESHOLD: u32 = 15;
 pub const MAX_DOOR_ATTEMPTS_PER_TICK: u32 = 3;
 pub const HMAC_TOLERANCE: u32 = 12;
+pub const LOCAL_ADMIN_ORIGIN: &str = "local_admin";
 
 impl Entity {
     pub fn new(entity_type: EntityType, initial_score: f64, priority: u8) -> Self {
@@ -108,12 +112,13 @@ impl Entity {
             origin_raw
         };
         Self::insert_metadata_bounded(&mut metadata, "origin_user".to_string(), origin);
+        let network_fingerprint = format!("fp_{}", rng.random_range(100000..999999));
+        let network_risk = rng.random_range(0.0..1.0);
         Self {
             id: Uuid::new_v4(),
             entity_type,
             trust_score: initial_score.clamp(0.0, 100.0),
             ring: RingId::Ring1,
-            arrival_time: now,
             last_update: now,
             circulation_ticks: 0,
             priority,
@@ -126,6 +131,50 @@ impl Entity {
             door_attempts: 0,
             last_attempt_tick: 0,
             attempt_cooldown: 0,
+            network_fingerprint: network_fingerprint.clone(),
+            network_risk,
+            last_network_fingerprint: network_fingerprint,
+            read_only: false,
+        }
+    }
+
+    pub fn new_with_origin(entity_type: EntityType, initial_score: f64, priority: u8, origin: &str) -> Self {
+        let now = Instant::now();
+        let mut rng = rand::rng();
+        let signature = rng.random_range(0.0..100.0);
+        let secondary_signature = rng.random_range(0.0..100.0);
+        let mut secret = [0u8; 32];
+        rng.fill_bytes(&mut secret);
+        let mut metadata = HashMap::new();
+        let origin_str = if origin.len() > MAX_ORIGIN_LEN {
+            origin[..MAX_ORIGIN_LEN].to_string()
+        } else {
+            origin.to_string()
+        };
+        Self::insert_metadata_bounded(&mut metadata, "origin_user".to_string(), origin_str);
+        let network_fingerprint = format!("fp_{}", rng.random_range(100000..999999));
+        let network_risk = rng.random_range(0.0..1.0);
+        Self {
+            id: Uuid::new_v4(),
+            entity_type,
+            trust_score: initial_score.clamp(0.0, 100.0),
+            ring: RingId::Ring1,
+            last_update: now,
+            circulation_ticks: 0,
+            priority,
+            metadata,
+            resonance_signature: signature,
+            secondary_signature,
+            suspicion_score: 0,
+            tagged: false,
+            secret,
+            door_attempts: 0,
+            last_attempt_tick: 0,
+            attempt_cooldown: 0,
+            network_fingerprint: network_fingerprint.clone(),
+            network_risk,
+            last_network_fingerprint: network_fingerprint,
+            read_only: false,
         }
     }
 
@@ -152,6 +201,10 @@ impl Entity {
         out.copy_from_slice(&result);
         out
     }
+
+    pub fn is_local_admin(&self) -> bool {
+        self.metadata.get("origin_user").map_or(false, |o| o == LOCAL_ADMIN_ORIGIN)
+    }
 }
 
 pub trait Validator {
@@ -177,8 +230,13 @@ impl Validator for SourceReputation {
             EntityType::Session => 1.0,
             _ => 0.5,
         };
-        let delta = if rng.random_bool(0.7) { base * 3.0 } else { -base * 2.0 };
+        // VPN / network risk penalty: high network_risk reduces trust and raises suspicion
+        let vpn_penalty = if entity.network_risk > 0.7 { -base * 2.0 } else { 0.0 };
+        let delta = if rng.random_bool(0.7) { base * 3.0 } else { -base * 2.0 } + vpn_penalty;
         entity.trust_score = (entity.trust_score + delta).clamp(0.0, 100.0);
+        if entity.network_risk > 0.7 {
+            entity.suspicion_score = entity.suspicion_score.saturating_add(1);
+        }
         delta
     }
 }
@@ -416,6 +474,18 @@ impl Roundabout {
         self.prune_maps();
     }
 
+    pub fn spawn_local_admin(&mut self, entity_type: EntityType, initial_score: f64, priority: u8) {
+        if self.entities.len() >= self.max_entities {
+            return;
+        }
+        let entity = Entity::new_with_origin(entity_type, initial_score, priority, LOCAL_ADMIN_ORIGIN);
+        let origin = entity.metadata.get("origin_user").cloned().unwrap_or_default();
+        let count = self.origin_entity_count.entry(origin.clone()).or_insert(0);
+        *count = count.saturating_add(1);
+        self.entities.push(entity);
+        self.prune_maps();
+    }
+
     pub fn tick(&mut self) {
         self.tick = self.tick.saturating_add(1);
         self.false_hits_this_tick = 0;
@@ -442,7 +512,16 @@ impl Roundabout {
         let mut origins_to_escalate = Vec::new();
 
         for entity in &mut self.entities {
+            if entity.is_local_admin() {
+                entity.read_only = false;
+                entity.tagged = false;
+                entity.suspicion_score = 0;
+            }
             if entity.ring == RingId::Quarantine {
+                if !entity.is_local_admin() && !entity.read_only {
+                    entity.read_only = true;
+                    println!("[READ ONLY ENFORCED] Entity {} from user {} moved to quarantine - access restricted to read-only, code execution blocked", entity.id, entity.metadata.get("origin_user").unwrap_or(&"unknown".to_string()));
+                }
                 entity.circulation_ticks = entity.circulation_ticks.saturating_add(1);
                 entity.last_update = Instant::now();
                 let mut rng = rand::rng();
@@ -464,6 +543,13 @@ impl Roundabout {
                         println!("[Sandbox] Entity {} [{:?}] from user {} is simulating activity in sandbox - suspicion {}, signature {:.1}", entity.id, entity.entity_type, origin, entity.suspicion_score, entity.resonance_signature);
                     }
                 }
+                // Decoy file lure: quarantined entities are offered fake sensitive files
+                if self.tick % 11 == 0 {
+                    let decoy_name = "confidential_designs_v2.zip";
+                    println!("[DECOY FILE] Entity {} from user {} attempted download of {} - LOCATION PINGED: {}", entity.id, origin, decoy_name, origin);
+                    // Increment suspicion to reflect interest in decoy assets
+                    entity.suspicion_score = entity.suspicion_score.saturating_add(1);
+                }
                 continue;
             }
             if matches!(entity.ring, RingId::Ejected | RingId::Core) {
@@ -471,9 +557,11 @@ impl Roundabout {
             }
 
             // Auto-eject on high suspicion
-            if entity.suspicion_score >= SUSPICION_EJECT_THRESHOLD {
+            if !entity.is_local_admin() && entity.suspicion_score >= SUSPICION_EJECT_THRESHOLD {
                 entity.ring = RingId::Quarantine;
                 entity.tagged = true;
+                entity.read_only = true;
+                println!("[READ ONLY ENFORCED] Entity {} from user {} suspicion {} >= threshold - access restricted to read-only, code execution blocked", entity.id, entity.metadata.get("origin_user").unwrap_or(&"unknown".to_string()), entity.suspicion_score);
                 continue;
             }
 
@@ -488,6 +576,14 @@ impl Roundabout {
             entity.secondary_signature += rng.random_range(-2.0..2.0);
             entity.secondary_signature = entity.secondary_signature.clamp(0.0, 100.0);
 
+            // VPN hop simulation: high network risk entities may change fingerprint
+            if entity.network_risk > 0.6 && rng.random_bool(0.02) {
+                entity.last_network_fingerprint = entity.network_fingerprint.clone();
+                entity.network_fingerprint = format!("fp_{}", rng.random_range(100000..999999));
+                println!("[VPN HOP DETECTED] Entity {} from user {} changed network fingerprint {} -> {} - suspicion increased", entity.id, entity.metadata.get("origin_user").unwrap_or(&"unknown".to_string()), entity.last_network_fingerprint, entity.network_fingerprint);
+                entity.suspicion_score = entity.suspicion_score.saturating_add(2);
+            }
+
             let evaluations = if entity.priority > 0 { 2 } else { 1 };
 
             let Some(ring_idx) = entity.ring.as_ring_index() else { continue };
@@ -499,7 +595,7 @@ impl Roundabout {
 
             let count = *ring_counts.get(&entity.ring).unwrap_or(&0);
 
-            if ring.should_eject(entity) {
+            if !entity.is_local_admin() && ring.should_eject(entity) {
                 entity.ring = RingId::Quarantine;
                 continue;
             }
@@ -548,6 +644,11 @@ impl Roundabout {
                         entity.door_attempts = 0;
                         entity.attempt_cooldown = 0;
                         entity.suspicion_score = entity.suspicion_score.saturating_sub(1).max(0);
+                        // Enforce read-only for tagged entities even if they advance
+                        if !entity.is_local_admin() && entity.tagged && !entity.read_only {
+                            entity.read_only = true;
+                            println!("[READ ONLY ENFORCED] Entity {} from user {} advanced to {:?} but remains tagged - access restricted to read-only, code execution blocked", entity.id, entity.metadata.get("origin_user").unwrap_or(&"unknown".to_string()), entity.ring);
+                        }
                         println!("[Tick {}] Entity {} resonated with REAL door {} on {:?}, advanced (score {:.1}, sig {:.1})", self.tick, entity.id, door.id, entity.ring, entity.trust_score, entity.resonance_signature);
                     } else {
                         entity.suspicion_score = entity.suspicion_score.saturating_add(1);
@@ -558,17 +659,21 @@ impl Roundabout {
                     println!("[Tick {}] Entity {} partially unlocked REAL door {} on {:?} - primary key OK, secondary key MISMATCH - suspicion {}", self.tick, entity.id, door.id, entity.ring, entity.suspicion_score);
                 } else if !door.is_real && resonance_match {
                     self.false_hits_this_tick = self.false_hits_this_tick.saturating_add(1);
-                    entity.tagged = true;
-                    entity.suspicion_score = entity.suspicion_score.saturating_add(2);
-                    entity.trust_score = (entity.trust_score - 10.0).clamp(0.0, 100.0);
-                    let origin = entity.metadata.get("origin_user").cloned().unwrap_or_else(|| "unknown".to_string());
-                    let hits = self.origin_hits.entry(origin.clone()).or_insert(0);
-                    *hits = hits.saturating_add(1);
-                    println!("[ADMIN ALERT] False door {} used by Entity {} [{:?}] from user {} at Ring {:?} - tagging and sandboxing", door.id, entity.id, entity.entity_type, origin, entity.ring);
-                    println!("[Tick {}] Entity {} hit FALSE door {} on {:?}, SUSPICION {} - moved to SANDBOX quarantine", self.tick, entity.id, door.id, entity.ring, entity.suspicion_score);
-                    entity.ring = RingId::Quarantine;
-                    if *hits >= 3 {
-                        origins_to_escalate.push(origin.clone());
+                    if !entity.is_local_admin() {
+                        entity.tagged = true;
+                        entity.read_only = true;
+                        entity.suspicion_score = entity.suspicion_score.saturating_add(2);
+                        entity.trust_score = (entity.trust_score - 10.0).clamp(0.0, 100.0);
+                        let origin = entity.metadata.get("origin_user").cloned().unwrap_or_else(|| "unknown".to_string());
+                        let hits = self.origin_hits.entry(origin.clone()).or_insert(0);
+                        *hits = hits.saturating_add(1);
+                        println!("[ADMIN ALERT] False door {} used by Entity {} [{:?}] from user {} at Ring {:?} - tagging and sandboxing", door.id, entity.id, entity.entity_type, origin, entity.ring);
+                        println!("[Tick {}] Entity {} hit FALSE door {} on {:?}, SUSPICION {} - moved to SANDBOX quarantine", self.tick, entity.id, door.id, entity.ring, entity.suspicion_score);
+                        println!("[READ ONLY ENFORCED] Entity {} from user {} false door usage - access restricted to read-only, code execution blocked", entity.id, origin);
+                        entity.ring = RingId::Quarantine;
+                        if *hits >= 3 {
+                            origins_to_escalate.push(origin.clone());
+                        }
                     }
                 } else {
                     // No resonance, mild suspicion increase on repeated attempts
@@ -576,10 +681,15 @@ impl Roundabout {
                         entity.suspicion_score = entity.suspicion_score.saturating_add(1);
                     }
                 }
-            } else if ring.should_drop_back(entity, true, count) {
+            } else if !entity.is_local_admin() && ring.should_drop_back(entity, true, count) {
                 entity.ring = entity.ring.prev();
                 entity.circulation_ticks = 0;
                 println!("[Tick {}] Entity {} dropped back to {:?} (score {:.1})", self.tick, entity.id, entity.ring, entity.trust_score);
+            }
+            if entity.is_local_admin() {
+                entity.suspicion_score = 0;
+                entity.tagged = false;
+                entity.read_only = false;
             }
         }
 
@@ -588,7 +698,7 @@ impl Roundabout {
                 println!("[ADMIN ESCALATION] Origin {} triggered {} false door hits - ejecting all related entities", origin, self.origin_hits.get(&origin).unwrap());
                 for e in &mut self.entities {
                     if let Some(o) = e.metadata.get("origin_user") {
-                        if o == &origin && e.ring != RingId::Ejected {
+                        if o == &origin && e.ring != RingId::Ejected && !e.is_local_admin() {
                             e.ring = RingId::Quarantine;
                             e.tagged = true;
                             e.suspicion_score = e.suspicion_score.saturating_add(5);

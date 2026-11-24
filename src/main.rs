@@ -21,6 +21,8 @@ fn main() {
     for _ in 0..3 {
         roundabout.spawn_entity(EntityType::Device, rng.random_range(50.0..80.0), 1);
     }
+    // Demonstrate local admin-only full access
+    roundabout.spawn_local_admin(EntityType::Session, 90.0, 1);
 
     for _ in 0..100 {
         roundabout.tick();

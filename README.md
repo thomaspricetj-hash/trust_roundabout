@@ -2,6 +2,8 @@
 
 A multi-lane Zero Trust security simulation implementing a circular trust model with sliding verification windows.
 
+**Design Summary (≤350 chars):** Trust Roundabout is a Zero Trust multi-lane security simulation with five concentric rings, sliding verification windows, rotating/sliding doors with false doors/keys, dual-key resonance, HMAC challenge-response, sandbox quarantine deception, origin tracking, swarm mitigation, VPN-resilient fingerprinting, and local-admin-only full access.
+
 ## Concept
 
 Instead of a linear inspect → allow/deny firewall, traffic orbits through concentric **Trust Rings** until enough evidence accumulates to grant deeper access.
@@ -35,9 +37,13 @@ Entities can:
 - Resonance-based real key: entity signature must resonate with real door frequency
 - False door usage tags entity, tracks origin user, admin alert, and sandbox quarantine
 - Sandbox simulates real system with fake progress messages to keep entity engaged for longer tracking
+- Decoy files in sandbox: quarantined entities are offered fake sensitive files; download attempts are logged with origin location ping
+- Read-only enforcement: tagged/quarantined entities have code execution blocked and access restricted to read-only; advancement while tagged still enforces read-only
+- Local admin-only full access: only entities with origin `local_admin` from on-site host terminal bypass read-only enforcement and can obtain full write/execute access; all remote entities remain read-only
 - Origin correlation tracking with auto-escalation: repeated false door hits from same origin trigger admin escalation and mass quarantine
 - Swarm mitigation: detects bursts of false door hits, activates swarm mode with tighter resonance tolerance and faster door rotation, and logs swarm alerts
 - HMAC-SHA256 challenge-response per entity secret for real door verification
+- VPN-resilient design: network fingerprint tracking, VPN hop detection, network risk scoring in source reputation validator, suspicion escalation on fingerprint change
 - Defense-in-depth hardening: `#![forbid(unsafe_code)]`, CSPRNG, per-entity secret, global admission control, per-origin rate limiting, bounded metadata length and entry count, checked/saturating arithmetic, safe ring indexing
 - Buffer-overflow protection via Rust safety guarantees plus explicit bounds checks
 - Unit tests for door rotation invariants, metadata bounds, origin rate limiting, and HMAC determinism

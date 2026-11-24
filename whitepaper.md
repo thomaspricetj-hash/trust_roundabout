@@ -140,13 +140,19 @@ Quarantined entities remain active in a simulated environment:
 | Metadata injection / DoS | Bounded metadata length/entries, origin map pruning |
 | Buffer overflow | Rust safety, no unsafe code, explicit bounds |
 
-### 7.1 Attacker Weak Points Addressed
+### 7.1 VPN Resilience
+Network fingerprint and network risk scoring are tracked per entity. High-risk network profiles are penalized in Ring 2 Source Reputation, raising suspicion. Simulated VPN hops randomly change `network_fingerprint` for high-risk entities, triggering `[VPN HOP DETECTED]` logs and suspicion escalation. This makes VPN use observable as behavioral change, not just IP change, and ties it to HMAC-bound identity.
+
+### 7.2 Attacker Weak Points Addressed
 * Ring index cast overflow → safe `Option<usize>` mapping
 * Counter overflow → saturating arithmetic
 * Unbounded maps → `MAX_ORIGINS` pruning
 * Pure numeric resonance → HMAC secret binding
 * Timing fingerprint → jittered sandbox logs
 * Priority abuse → limited evaluations, backoff
+
+### 7.3 Local Admin-Only Full Access
+Only entities with origin `local_admin` – representing an on-site host terminal admin – bypass read-only enforcement. All remote entities are confined to read-only and cannot execute code. The simulation enforces `read_only` flag on quarantine, suspicion, and false-door tagging, with explicit exemption for `LOCAL_ADMIN_ORIGIN`. Admin access is logged and requires physical presence, preventing remote privilege escalation.
 
 ## 8. Attack Simulation Test Suite
 

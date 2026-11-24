@@ -83,3 +83,21 @@ fn test_hmac_gate_blocks_fake_resonance() {
     // At least some entities should remain or be quarantined, not all advanced
     assert!(quarantined <= total);
 }
+
+#[test]
+fn test_local_admin_bypasses_read_only() {
+    let mut rb = Roundabout::new();
+    // Spawn a local admin entity with high trust
+    rb.spawn_local_admin(EntityType::Session, 95.0, 1);
+    // Run many ticks to trigger suspicion / quarantine logic
+    for _ in 0..200 {
+        rb.tick();
+    }
+    // Local admin should never be tagged or read-only enforced
+    // We verify via public counters: tagged_count should be 0 for admin only scenario
+    // Since only admin exists, tagged_count must be 0
+    assert_eq!(rb.tagged_count(), 0, "Local admin should never be tagged");
+    assert_eq!(rb.quarantined_count(), 0, "Local admin should never be quarantined");
+    // Suspicion may transiently rise during tick but is reset for admin; ensure it stays bounded
+    assert!(rb.max_suspicion() <= 1, "Local admin suspicion should remain bounded");
+}
